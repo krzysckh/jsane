@@ -12,7 +12,24 @@
 (define (jsize-symbol s) ; B
   (jsize-1 (jsize-2 s)))
 
-(define infix '(+ - / // * ** % = == === != !== && ||))
+(define infix '(+ - / // * ** % = == === != !== && || < > <= >= ^ |\||))
+
+(define fn-rewrite-alist
+  '((and    . &&)
+    (or     . ||)
+    (not    . !)
+    (bnot   . ~)
+    (bior   . |\||)
+    (ior    . |\||)
+    (bxor   . ^) 
+    (xor    . ^) 
+    (modulo . %)
+    (mod    . %)
+    (=      . ==)
+    (eq?    . ===)
+    (eqv?   . ==)
+    (equal? . ==)
+    ))
 
 (define (commize vs)
   (cond
@@ -24,20 +41,38 @@
      (car vs)
      (cdr vs)))))
 
+(define (maybe-rewrite-fn v)
+  (if-lets ((newsym (assoc v fn-rewrite-alist)))
+    (cdr newsym)
+    (jsize-symbol (str v))))
+
+(define (infix? v)
+  (or (has? infix v) (has? infix (maybe-rewrite-fn v))))
+
 (define (jsize-thing v)
   (cond
    ((number? v) v)
    ((string? v) (str* v))
-   ((symbol? v) (if (eqv? v '=)
-                    "=="
-                    (jsize-symbol (str v))))
+   ((symbol? v) (maybe-rewrite-fn v))
    ((list? v) (str "[" (commize (map jsize-thing v)) "]"))
 
    (else
     (error "unknown thing " v))))
 
 (define-syntax js
-  (syntax-rules (λ _let begin define quote if when list-ref ref _raw)
+  (syntax-rules (λ _let begin define quote if when list-ref ref _raw set! spread return)
+    ((_ (return it) . rest)
+     (str
+      "return " (_ it)
+      (_ . rest)))
+    ((_ (spread lst) . rest)
+     (str
+      "[..." (_ lst) "]"
+      (_ . rest)))
+    ((_ (set! place val) . rest)
+     (str
+      (_ place) " = " (_ val) ";"
+      (_ . rest)))
     ((_ (_raw string) . rest)
      (str string (_ . rest)))
     ((_ (ref obj key) . rest)
@@ -75,10 +110,13 @@
       "((" (commize (list (_ arg) ...)) ") => { " (_ (begin . code)) " })"
       (_ . rest)))
     ((_ (_let 42 () . code))
-     (_ . code))
+     (_ (begin . code)))
+    ((_ (_let 42 ((name value)) . code))
+     (_ ((λ (name)
+           (_let 42 () . code)) value)))
     ((_ (_let 42 ((name value) . vars) . code))
      (_ ((λ (name)
-           (_let 42 vars . code)) value)))
+           (return (_let 42 vars . code))) value)))
     ((_ (let ((uh um) ...) . code) . rest)
      (str
       (_ (_let 42 ((uh um) ...) . code))
@@ -88,7 +126,7 @@
           (_ . rest)))
     ((_ (f arg1 arg2) . rest)  ; only check for infix operators in funcalls with 2 args, sorry in advance :/
      (str
-      (if (has? infix 'f)
+      (if (infix? 'f)
           (str "(" (_ arg1) ")" (_ 'f) "(" (_ arg2) ")")
           (str (_ f) "(" (commize (list (_ arg1) (_ arg2))) ")")) ; this repeats >---+
       (_ . rest)))                                                ;                  |
@@ -101,29 +139,52 @@
     ((_) "")
     ))
 
-;; (print
-;;  (js
-;;   (define print console.log)
-;;   (define (car lst)   (return (list-ref lst 0)))
-;;   (define (cdr lst)   (return ((ref lst splice) 1)))
-;;   (define (null? ob)  (return (= (ref ob length) 0)))
-;;   (define (map f lst) (return ((ref lst map) f)))
+(define lib
+  (string->list
+   (js
+    (define jsane--lib--loaded "indeed")
 
-;;   (define (iota n) (return (_raw "[...Array(n).keys()]")))
+    (define print console.log)
+    (define (car lst)   (return (list-ref lst 0)))
+    (define (cdr lst)   (return ((ref lst splice) 1)))
+    (define (null? ob)  (return (= (ref ob length) 0)))
+    (define (map f lst) (return ((ref lst map) f)))
 
-;;   (define fold (λ (f a b)
-;;                  (if (null? b)
-;;                      (return a)
-;;                      (return (fold f (f a (car b)) (cdr b))))))
+    (define list Array)
+    (define (element! type) (return (document.createElement type)))
 
-;;   (define (main)
-;;     (print (fold (λ (a b) (return (+ a b))) 0 (Array 1 2 3)))
-;;     (print (iota 10))
-;;     (print (map (λ (x) (return (+ x 1))) (iota 10)))
-;;     )
+    (define fold (λ (f a b)
+                   (if (null? b)
+                       (return a)
+                       (return (fold f (f a (car b)) (cdr b)))))))))
 
-;;   (main)
-;;   ))
+;; TODO: this assumes lib.js in the same dir and also named lib.js
+(define maybe-load-lib
+  (string->list
+   (js
+    (_raw "let jsane__ready_p = false;\n")
+
+    (define (jsane--load--lib!)
+      (let ((script (document.createElement "script"))
+            (cb (λ ()
+                  (set! jsane__ready_p true))))
+        (set! script.type "text/javascript")
+        (set! script.src "lib.js")
+        (document.head.appendChild script)
+
+        (set! script.onreadystatechange cb)
+        (set! script.onload cb)))
+
+    (define (when-jsane-ready f)
+      (if jsane__ready_p
+          (f)
+          (setTimeout (λ () (when-jsane-ready f)) 100)))
+
+    (define when-ready when-jsane-ready)
+
+    (when (eqv? (typeof jsane--lib--loaded) "undefined")
+      (jsane--load--lib!))
+    )))
 
 (define scheme? (string->regex "m/\\.scm$/"))
 (define scheme-ext->js-ext (string->regex "s/\\.scm$/.js/"))
@@ -131,6 +192,7 @@
 (define command-line-rules
   (cl-rules
    `((help     "-h" "--help")
+     (no-lib   "-n" "--no-library" comment "don't load the builtin library")
      (input    "-i" "--input"  has-arg comment "input file directory (not recursive)")
      (output   "-o" "--output" has-arg comment "target directory for js files" default "public"))))
 
@@ -153,7 +215,8 @@
        (halt 0))
 
      (let ((in (get opt 'input #f))
-           (out (get opt 'output #f)))
+           (out (get opt 'output #f))
+           (no-lib (get opt 'no-lib #f)))
        (cond
         ((= (length extra) 1)         (write-bytes stdout (eval-file (car extra))) 0)
         ((and (null? extra) (not in)) (write-bytes stdout (eval-file stdin)) 0)
@@ -163,6 +226,10 @@
         (else
          (when (not (sys/directory? out))
            (sys/mkdir out #o755))
+
+         (unless no-lib
+           (list->file lib (str out "/lib.js")))
+
          (let walk ((files
                      (filter
                       (λ (f) (let ((p (full-path in f)))
@@ -172,6 +239,6 @@
                0
                (let* ((inp (full-path in (car files)))
                       (outp (full-path out (scheme-ext->js-ext (car files)))))
-                 (list->file (eval-file inp) outp)
+                 (list->file (append (if no-lib #n maybe-load-lib) (eval-file inp)) outp)
                  (format stdout "~a -> ~a~%" inp outp)
                  (walk (cdr files)))))))))))
