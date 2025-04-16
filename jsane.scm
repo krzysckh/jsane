@@ -60,7 +60,7 @@
     (error "unknown thing " v))))
 
 (define-syntax js
-  (syntax-rules (λ _let begin define quote if when list-ref ref _raw set! spread return)
+  (syntax-rules (λ _let begin define quote if when list-ref ref _raw set! spread return returning-begin)
     ((_ (return it) . rest)
      (str
       "return " (_ it)
@@ -85,19 +85,33 @@
       (_ . rest)))
     ((_ (begin) . rest)
      (_ . rest))
+    ((_ (begin exp1) . rest)
+     (str
+      "(() => { return " (_ exp1) "})();"
+      (_ . rest)))
     ((_ (begin exp1 . exp) . rest)
      (str
-      (_ exp1) ";"
-      (_ (begin . exp) . rest)))
+      "(() => {" (_ exp1) "; return " (_ (begin . exp)) "})();"
+      (_ . rest)))
+    ;; ((_ (returning-begin) . rest)
+    ;;  (_ . rest))
+    ;; ((_ (returning-begin exp1) . rest)
+    ;;  (str
+    ;;   (_ (return exp1)) ";"
+    ;;   (_ . rest)))
+    ;; ((_ (returning-begin exp1 . exp) . rest)
+    ;;  (str
+    ;;   (_ exp1) ";"
+    ;;   (_ (returning-begin . exp) . rest)))
     ((_ (when test . then) . rest)
      (_ (if test (begin . then)) . rest))
     ((_ (if test then else) . rest)
      (str
-      "if (" (_ test) ") { " (_ then) " } else { " (_ else) " }"
+      "(() => { if (" (_ test) ") { return " (_ then) " } else { return " (_ else) " } })()"
       (_ . rest)))
     ((_ (if test then) . rest)
      (str
-      "if (" (_ test) ") { " (_ then) " } "
+      "(() => { if (" (_ test) ") { return " (_ then) " } })()"
       (_ . rest)))
     ((_ (define (name . args) . code) . rest)
      (_ (define name (λ args . code)) . rest))
@@ -107,16 +121,16 @@
       (_ . rest)))
     ((_ (λ (arg ...) . code) . rest)
      (str
-      "((" (commize (list (_ arg) ...)) ") => { " (_ (begin . code)) " })"
+      "((" (commize (list (_ arg) ...)) ") => { " (_ (return (begin . code))) " })"
       (_ . rest)))
     ((_ (_let 42 () . code))
      (_ (begin . code)))
-    ((_ (_let 42 ((name value)) . code))
-     (_ ((λ (name)
-           (_let 42 () . code)) value)))
+    ;; ((_ (_let 42 ((name value)) . code))
+    ;;  (_ ((λ (name)
+    ;;        (_let 42 () . code)) value)))
     ((_ (_let 42 ((name value) . vars) . code))
      (_ ((λ (name)
-           (return (_let 42 vars . code))) value)))
+           (_let 42 vars . code)) value)))
     ((_ (let ((uh um) ...) . code) . rest)
      (str
       (_ (_let 42 ((uh um) ...) . code))
@@ -145,46 +159,50 @@
     (define jsane--lib--loaded "indeed")
 
     (define print console.log)
-    (define (car lst)   (return (list-ref lst 0)))
-    (define (cdr lst)   (return ((ref lst splice) 1)))
-    (define (null? ob)  (return (= (ref ob length) 0)))
-    (define (map f lst) (return ((ref lst map) f)))
+    (define (car lst)   (list-ref lst 0))
+    (define (cdr lst)   ((ref lst splice) 1))
+    (define (null? ob)  (= (ref ob length) 0))
+    (define (map f lst) ((ref lst map) f))
 
     (define list Array)
-    (define (element! type) (return (document.createElement type)))
+    (define (element! type) (document.createElement type))
 
     (define fold (λ (f a b)
                    (if (null? b)
-                       (return a)
-                       (return (fold f (f a (car b)) (cdr b)))))))))
+                       a
+                       (fold f (f a (car b)) (cdr b))))))))
 
 ;; TODO: this assumes lib.js in the same dir and also named lib.js
 (define maybe-load-lib
   (string->list
-   (js
-    (_raw "let jsane__ready_p = false;\n")
+   (str
+    "let when_ready; let when_jsane_ready;"
+    (js
+     (begin
+       (_raw "let jsane__ready_p = false;\n")
 
-    (define (jsane--load--lib!)
-      (let ((script (document.createElement "script"))
-            (cb (λ ()
-                  (set! jsane__ready_p true))))
-        (set! script.type "text/javascript")
-        (set! script.src "lib.js")
-        (document.head.appendChild script)
+       (define (jsane--load--lib!)
+         (let ((script (document.createElement "script"))
+               (cb (λ ()
+                     (set! jsane__ready_p true))))
+           (set! script.type "text/javascript")
+           (set! script.src "lib.js")
+           (document.head.appendChild script)
 
-        (set! script.onreadystatechange cb)
-        (set! script.onload cb)))
+           (set! script.onreadystatechange cb)
+           (set! script.onload cb)))
 
-    (define (when-jsane-ready f)
-      (if jsane__ready_p
-          (f)
-          (setTimeout (λ () (when-jsane-ready f)) 100)))
+       (define (_when-jsane-ready f)
+         (if jsane__ready_p
+             (f)
+             (setTimeout (λ () (when-jsane-ready f)) 100)))
 
-    (define when-ready when-jsane-ready)
+       (set! when_ready _when-jsane-ready)
+       (set! when_jsane_ready _when-jsane-ready)
 
-    (when (eqv? (typeof jsane--lib--loaded) "undefined")
-      (jsane--load--lib!))
-    )))
+       (when (eqv? (typeof jsane--lib--loaded) "undefined")
+         (jsane--load--lib!))
+    )))))
 
 (define scheme? (string->regex "m/\\.scm$/"))
 (define scheme-ext->js-ext (string->regex "s/\\.scm$/.js/"))
