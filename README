@@ -2,4 +2,27 @@ javascript, but epic (insane)
 
 an excercise in syntax rules
 
-do not use
+-- do not use --
+
+consider this piece of insane, old, boring, non-functional JS code:
+
+  const print = console.log
+  print(22 + 20);
+
+EW! yuck! this is too little parentheses for my taste, so what about:
+
+  (js
+    (let ((print console.log))
+      (print (+ 22 20))))
+
+that's more like it!
+
+please do ignore the fact that it spits out:
+
+  ((print) => {
+    return (() => {
+      return (() => {
+        return print((22) + (20))
+      })();
+    })();
+  })(console.log)
