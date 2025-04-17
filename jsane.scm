@@ -42,9 +42,11 @@
      (cdr vs)))))
 
 (define (maybe-rewrite-fn v)
-  (if-lets ((newsym (assoc v fn-rewrite-alist)))
-    (cdr newsym)
-    (jsize-symbol (str v))))
+  (if (has? infix v)
+      v
+      (if-lets ((newsym (assoc v fn-rewrite-alist)))
+        (cdr newsym)
+        (jsize-symbol (str v)))))
 
 (define (infix? v)
   (or (has? infix v) (has? infix (maybe-rewrite-fn v))))
@@ -141,7 +143,7 @@
     ((_ (f arg1 arg2) . rest)  ; only check for infix operators in funcalls with 2 args, sorry in advance :/
      (str
       (if (infix? 'f)
-          (str "(" (_ arg1) ")" (_ 'f) "(" (_ arg2) ")")
+          (str "((" (_ arg1) ")" (_ 'f) "(" (_ arg2) "))")
           (str (_ f) "(" (commize (list (_ arg1) (_ arg2))) ")")) ; this repeats >---+
       (_ . rest)))                                                ;                  |
     ((_ (f arg ...) . rest)                                       ;                  |
@@ -202,7 +204,7 @@
 
        (when (eqv? (typeof jsane--lib--loaded) "undefined")
          (jsane--load--lib!))
-    )))))
+       )))))
 
 (define scheme? (string->regex "m/\\.scm$/"))
 (define scheme-ext->js-ext (string->regex "s/\\.scm$/.js/"))
