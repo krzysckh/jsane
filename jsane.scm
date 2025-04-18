@@ -6,13 +6,30 @@
 ;; TODO: i really want this to be a shitty cps
 ;; TODO: i also want to find the last exp per function, as (return)-ing in scheme is sacrilege
 
-(define jsize-1 (string->regex "s/[\\-*!@#$%^&*]/_/g"))
-(define jsize-2 (string->regex "s/\\?$/_p/g"))
+(define jsize-rename-alist
+  '((#\- . "_")
+    (#\= . "Eql")
+    (#\* . "Star")
+    (#\! . "Bang")
+    (#\@ . "At")
+    (#\# . "Hash")
+    (#\% . "Perc")
+    (#\^ . "Wedgie")
+    (#\& . "And")
+    (#\? . "_p")
+    (#\< . "ALeft")
+    (#\> . "ARight")))
 
 (define (jsize-symbol s) ; B
-  (jsize-1 (jsize-2 s)))
+  (fold
+   (λ (a b)
+     (if-lets ((v (assoc b jsize-rename-alist))) 
+       (str a (cdr v))
+       (str a (string b))))
+   ""
+   (string->runes s)))
 
-(define infix '(+ - / // * ** % = == === != !== && || < > <= >= ^ |\||))
+(define infix '(+ - / // * ** % = == === != !== && || < > <= >= ^ |\|| << >>))
 
 (define fn-rewrite-alist
   '((and    . &&)
@@ -29,6 +46,7 @@
     (eq?    . ===)
     (eqv?   . ==)
     (equal? . ==)
+    (=      . ==)
     ))
 
 (define (commize vs)
@@ -62,7 +80,19 @@
     (error "unknown thing " v))))
 
 (define-syntax js
-  (syntax-rules (λ _let begin define quote if when list-ref ref _raw set! spread return returning-begin)
+  (syntax-rules (λ _let begin define quote if when list-ref ref _raw set! spread spreading return new while object =>)
+    ((_ (object (key => value) ...) . rest)
+     (str
+      "({" (str (_ key) ":" (_ value) ",") ... "})"
+      (_ . rest)))
+    ((_ (while test . do) . rest)
+     (str
+      "while (" (_ test) ")" (_ (begin . do))
+      (_ . rest)))
+    ((_ (new T arg ...) . rest)
+     (str
+      "(new " (_ T) "(" (commize (list (_ arg) ...)) "))"
+      (_ . rest)))
     ((_ (return it) . rest)
      (str
       "return " (_ it)
@@ -70,6 +100,10 @@
     ((_ (spread lst) . rest)
      (str
       "[..." (_ lst) "]"
+      (_ . rest)))
+    ((_ (spreading lst) . rest)
+     (str
+      "..." (_ lst) ""
       (_ . rest)))
     ((_ (set! place val) . rest)
      (str
@@ -95,16 +129,6 @@
      (str
       "(() => {" (_ exp1) "; return " (_ (begin . exp)) "})();"
       (_ . rest)))
-    ;; ((_ (returning-begin) . rest)
-    ;;  (_ . rest))
-    ;; ((_ (returning-begin exp1) . rest)
-    ;;  (str
-    ;;   (_ (return exp1)) ";"
-    ;;   (_ . rest)))
-    ;; ((_ (returning-begin exp1 . exp) . rest)
-    ;;  (str
-    ;;   (_ exp1) ";"
-    ;;   (_ (returning-begin . exp) . rest)))
     ((_ (when test . then) . rest)
      (_ (if test (begin . then)) . rest))
     ((_ (if test then else) . rest)
@@ -127,9 +151,6 @@
       (_ . rest)))
     ((_ (_let 42 () . code))
      (_ (begin . code)))
-    ;; ((_ (_let 42 ((name value)) . code))
-    ;;  (_ ((λ (name)
-    ;;        (_let 42 () . code)) value)))
     ((_ (_let 42 ((name value) . vars) . code))
      (_ ((λ (name)
            (_let 42 vars . code)) value)))
@@ -162,9 +183,13 @@
 
     (define print console.log)
     (define (car lst)   (list-ref lst 0))
-    (define (cdr lst)   ((ref lst splice) 1))
-    (define (null? ob)  (= (ref ob length) 0))
+    (define (cdr lst)   ((ref lst slice) 1))
+    (define (length ob) (ref ob 'length))
+    (define len length)
+    (define (null? ob)  (eq? (length ob) 0))
     (define (map f lst) ((ref lst map) f))
+    (define (take l n)  ((ref l 'slice) 0 n))
+    (define (drop l n)  ((ref l 'slice) n))
 
     (define list Array)
     (define (element! type) (document.createElement type))
