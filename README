@@ -1,4 +1,4 @@
-javascript, but epic (insane)
+javascript, but epic (insane). now with even more macros!
 
 an excercise in syntax rules
 
@@ -11,9 +11,8 @@ consider this piece of insane, old, boring, non-functional JS code:
 
 EW! yuck! this is too little parentheses for my taste, so what about:
 
-  (js
-    (let ((print console.log))
-      (print (+ 22 20))))
+  (let ((print console.log))
+    (print (+ 22 20)))
 
 that's more like it!
 
@@ -22,7 +21,7 @@ please do ignore the fact that it spits out:
   ((print) => {
     return (() => {
       return (() => {
-        return print((22) + (20))
+        return print(((22) + (20)))
       })();
     })();
   })(console.log)

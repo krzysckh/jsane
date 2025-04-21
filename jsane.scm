@@ -1,10 +1,10 @@
 (import
  (owl toplevel)
  (owl args)
+ (owl sexp)
  (prefix (owl sys) sys/))
 
 ;; TODO: i really want this to be a shitty cps
-;; TODO: i also want to find the last exp per function, as (return)-ing in scheme is sacrilege
 
 (define jsize-rename-alist
   '((#\- . "_")
@@ -79,8 +79,74 @@
    (else
     (error "unknown thing " v))))
 
-(define-syntax js
-  (syntax-rules (λ _let begin define quote if when list-ref ref _raw set! spread spreading return new while object =>)
+;; macro = ff of
+;;  name
+;;  args
+;;  body
+(define (defmacro? e)
+  (and (list? e)
+       (or
+        (eqv? (car e) 'defmacro)
+        (eqv? (car e) 'define-macro))))
+
+(define (macro-letize exp args body)
+  (cond
+   ((null? args) body)
+   ((pair? args)
+    `(let ((,(car args) ',(car exp)))
+       ,(macro-letize (cdr exp) (cdr args) body)))
+   (else
+    `(let ((,args ',exp))
+       ,(macro-letize #n #n body)))))
+
+(define (apply-macro macro exp walk)
+  (let* ((name (get macro 'name #f))
+         (args (get macro 'args #f))
+         (body (get macro 'body #f))
+         (code (macro-letize (cdr exp) args body)))
+    (walk (eval code *toplevel*))))
+
+(define (walk-apply-macros macros exp)
+  (let* ((names (map (λ (m) (get m 'name #f)) macros))
+         (ms (zip cons names macros)))
+    (let walk ((exp exp))
+      (cond
+       ((null? exp)
+        #n)
+       ((not (list? exp))
+        exp)
+       ((has? names (car exp))
+        (apply-macro (cdr (assoc (car exp) ms)) exp walk))
+       (else
+        (map walk exp))))))
+
+(define (macro-of exp)
+  (let* ((exps (cadr exp))
+         (name (car exps))
+         (args (cdr exps))
+         (body (caddr exp)))
+    (pipe empty
+      (put 'name name)
+      (put 'args args)
+      (put 'body body))))
+
+;; forms -> forms'
+(define (apply-macros forms)
+  (let* ((defmacros     (filter defmacro? forms))
+         (not-defmacros (filter (B not defmacro?) forms))
+         (macros (map macro-of defmacros)))
+    (map (H walk-apply-macros macros) not-defmacros)))
+
+(define core
+  '((define-macro (let lst . body)
+      (if (null? lst)
+          `(begin
+             ,@body)
+          `((λ (,(caar lst)) (let ,(cdr lst) ,@body)) ,(cadar lst))))
+    ))
+
+(define-syntax js_
+  (syntax-rules (λ begin define quote if when list-ref ref _raw set! spread spreading return new while object =>)
     ((_ (object (key => value) ...) . rest)
      (str
       "({" (str (_ key) ":" (_ value) ",") ... "})"
@@ -149,15 +215,6 @@
      (str
       "((" (commize (list (_ arg) ...)) ") => { " (_ (return (begin . code))) " })"
       (_ . rest)))
-    ((_ (_let 42 () . code))
-     (_ (begin . code)))
-    ((_ (_let 42 ((name value) . vars) . code))
-     (_ ((λ (name)
-           (_let 42 vars . code)) value)))
-    ((_ (let ((uh um) ...) . code) . rest)
-     (str
-      (_ (_let 42 ((uh um) ...) . code))
-      (_ . rest)))
     ((_ (quote thing) . rest)
      (str (jsize-thing 'thing)
           (_ . rest)))
@@ -175,6 +232,11 @@
           (_ . rest)))
     ((_) "")
     ))
+
+(define-syntax js
+  (syntax-rules (*toplevel*)
+    ((_ exp ...)
+     (eval (append '(js_) (apply-macros (append core '(exp ...)))) *toplevel*))))
 
 (define lib
   (string->list
@@ -245,10 +307,9 @@
   (format #f "~a/~a" d s))
 
 (define (eval-file path)
-  (let* ((f (if (port? path) path (open-input-file path)))
-         (res (eval (read f) *toplevel*)))
-    (when (not (port? path))
-      (close-port f))
+  (let* ((lst (if (port? path) (force-ll (port->byte-stream path)) (file->list path)))
+         (code `(let ((*toplevel* ,*toplevel*)) ,(append '(js) (list->sexps lst print "syntax-error"))))
+         (res (eval code *toplevel*)))
     (string->list res)))
 
 (λ (args)
