@@ -280,6 +280,38 @@
      (define-macro (print l)
        `(console.log ,l))
 
+     ;; https://haltp.org/posts/recursion.html
+     (define-macro (letrec lst . body)
+       (let* ((names (map car lst))
+              (bodies (map cadr lst))
+              (args (map cadr bodies))
+              (bodies*
+               (map
+                (λ (body)
+                  (let walk ((b body))
+                    (cond
+                     ((null? b) #n)
+                     ((and (list? b) (has? names (car* b)))
+                      (append (map walk b) names))
+                     ((list? b)
+                      (map walk b))
+                     (else
+                      b))))
+                bodies))
+              (bodies*
+               (map
+                (λ (l) (lset l 1 (append (lref l 1) names)))
+                bodies*))
+              (subs (map (λ (n) (string->symbol (str "sub" n))) (iota 0 1 (len names)))))
+         `(let (,@(map
+                   (λ (n)
+                     `(,(lref subs n) ,(lref bodies* n)))
+                   (iota 0 1 (len names))))
+            (let (,@(map
+                     (λ (n)
+                       `(,(lref names n) (λ (,@(lref args n)) (,(lref subs n) ,@(lref args n) ,@subs))))
+                     (iota 0 1 (len names))))
+              ,@body))))
      )))
 
 (define (compile filename)
