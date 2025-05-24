@@ -4,7 +4,167 @@
  (owl sexp)
  (prefix (owl sys) sys/))
 
-;; TODO: i really want this to be a shitty cps
+(define infix '(+ - / // * ** % = == === != !== && || < > <= >= ^ |\|| << >>))
+
+(define fn-rewrite-alist
+  '((and    . &&)
+    (or     . ||)
+    (not    . !)
+    (bnot   . ~)
+    (bior   . |\||)
+    (ior    . |\||)
+    (bxor   . ^)
+    (xor    . ^)
+    (modulo . %)
+    (mod    . %)
+    (=      . ==)
+    (eq?    . ===)
+    (eqv?   . ==)
+    (equal? . ==)
+    (=      . ==)
+    ))
+
+(define (error . args)
+  (print-to stderr "error: " (fold str "" args))
+  (halt 42))
+
+;; this is funny -vvvvv- i stole this from owl
+(define (get-code codes env)
+  (let ((get-exp (get env 'get-exp 'bad)))
+    (let loop ((env env) (codes codes) (acc #n))
+      (if (null? codes)
+          (values acc env)
+          (lets ((d env (get-exp (car codes) env)))
+            (loop env (cdr codes) (append acc (list d))))))))
+
+(define (get-lambda v env)
+  (let ((get-exp (get env 'get-exp 'bad))
+        (names (get env 'names '())))
+    (when (or
+           (< (length v) 3)
+           (not (list? (cadr v))))
+      (error "bad lambda: " v))
+    (lets ((codes _ (get-code (cddr v) (put env 'names (append names (cadr v))))))
+      (values
+       (tuple 'λ (cadr v) codes)
+       env))))
+
+(define (get-macro v env)
+  (lets ((get-exp (get env 'get-exp 'bad))
+         (macro (get (get env 'macros empty) (car v) #f))
+         (args (cdr v))
+         (m-args m-code (values (ref macro 1) (ref macro 2))))
+    (let ((code
+           `(let (,@(let loop ((args args) (m-args m-args))
+                      (cond
+                       ((and (null? m-args) (not (null? args)))
+                        (error "args mismatched for macro " macro))
+                       ((null? m-args)
+                        #n)
+                       ((pair? m-args)
+                        (append
+                         `((,(car m-args) ',(car args)))
+                         (loop (cdr args) (cdr m-args))))
+                       (else ; (a b . c) <- we are at c
+                        `((,m-args '(,@args)))))))
+              ,@m-code)))
+      ;; (print "code: " code)
+      ;; (print "evald: " (eval code *toplevel*))
+      (get-exp (eval code *toplevel*) env))))
+
+(define (get-funcall v env)
+  (lets ((get-exp (get env 'get-exp 'bad))
+         (maybe-macro (get (get env 'macros empty) (car v) #f)))
+    (cond
+     (maybe-macro (get-macro v env))
+     ((has? infix (car v))
+      (if (not (= (len (cdr v)) 2))
+          (error "invalid number of args for infix!: " v)
+          (lets ((e1 _ (get-exp (car (cdr v)) env))
+                 (e2 _ (get-exp (cadr (cdr v)) env)))
+            (values (tuple 'infix! (car v) e1 e2) env))))
+     (else
+      (lets ((func _ (get-exp (car v) env))
+             (args _ (get-code (cdr v) env)))
+        (values
+         (tuple 'funcall func args)
+         env))))))
+
+(define (get-define v env)
+  (lets ((get-exp (get env 'get-exp 'bad))
+         (env (put env 'names (append (get env 'names '()) (list (cadr v))))))
+    (if (list? (cadr v))
+        (get-define
+         `(define ,(caadr v) (λ (,@(cdadr v)) ,@(cddr v)))
+         env)
+        (lets ((code _ (get-code (cddr v) env)))
+          (values
+           (tuple 'define (cadr v) code)
+           env)))))
+
+(define (get-extern v env)
+  (lets ((env (put env 'names (append (get env 'names '()) (cdr v)))))
+    (values
+     (tuple 'noop 'extern)
+     env)))
+
+(define (get-defmacro v env)
+  (lets ((macros (get env 'macros 'bad))
+         (name args code (values
+                          (car (cadr v))
+                          (cdr (cadr v))
+                          (cddr v)))
+         (macros (put macros name (tuple args code))))
+    (values
+     (tuple 'noop 'define-macro)
+     (put env 'macros macros))))
+
+(define (get-raw v env)
+  (let ((get-exp (get env 'get-exp 'bad)))
+    (values
+     (tuple '_raw (map (λ (e) (lets ((a _ (get-exp e env))) a)) (cdr v)))
+     env)))
+
+(define (get-set! v env)
+  (lets ((get-exp (get env 'get-exp 'bad))
+         (a _ (get-exp (cadr v) env))
+         (b _ (get-exp (caddr v) env)))
+    (values
+     (tuple 'set! a b)
+     env)))
+
+(define (get-funcall-alike v env)
+  (let ((get-exp (get env 'get-exp 'bad)))
+    (if (null? v)
+        (values (tuple 'noop 'huh) env)
+        (case (car v)
+          ('quote (get-exp (str (cadr v)) env))
+          ('λ (get-lambda v env))
+          ('define (get-define v env))
+          ('define-macro (get-defmacro v env))
+          ('extern (get-extern v env))
+          ('_raw (get-raw v env))
+          ('set! (get-set! v env))
+          ;; ('if (get-if v env))
+          (else
+           (get-funcall v env))))))
+
+(define (object-name ob)
+  (string->symbol (car* ((string->regex "c/\\./") (str ob)))))
+
+(define (get-exp v env)
+  (cond
+   ((list? v)
+    (get-funcall-alike v env))
+   (else
+    (let ((names (get env 'names '())))
+      (if-lets ((_ (symbol? v))
+                (ob-name (object-name v))
+                (_ (and (symbol? v) (not (has? names ob-name)))))
+        (error "undeclared variable: " v " - if this is intentional, declare it as (extern " ob-name ")"))
+      (values
+       (tuple 'value v)
+       env)))))
 
 (define jsize-rename-alist
   '((#\- . "_")
@@ -20,34 +180,121 @@
     (#\< . "ALeft")
     (#\> . "ARight")))
 
-(define (jsize-symbol s) ; B
-  (fold
-   (λ (a b)
-     (if-lets ((v (assoc b jsize-rename-alist))) 
-       (str a (cdr v))
-       (str a (string b))))
-   ""
-   (string->runes s)))
+(define (jsize-symbol s)
+  (if (has? (map cdr fn-rewrite-alist) s)
+      s
+      (fold
+       (λ (a b)
+         (if-lets ((v (assoc b jsize-rename-alist)))
+           (str a (cdr v))
+           (str a (string b))))
+       ""
+       (string->runes (str s)))))
 
-(define infix '(+ - / // * ** % = == === != !== && || < > <= >= ^ |\|| << >>))
+(define *core*
+  (append
+   (map
+    (λ (f)
+      (list 'define-macro (ilist (car f) 'args)
+            (append '(quasiquote)
+                    (list (list (cdr f) '(unquote-splicing args))))))
+    fn-rewrite-alist)
 
-(define fn-rewrite-alist
-  '((and    . &&)
-    (or     . ||)
-    (not    . !)
-    (bnot   . ~)
-    (bior   . |\||)
-    (ior    . |\||)
-    (bxor   . ^) 
-    (xor    . ^) 
-    (modulo . %)
-    (mod    . %)
-    (=      . ==)
-    (eq?    . ===)
-    (eqv?   . ==)
-    (equal? . ==)
-    (=      . ==)
-    ))
+   `((extern console document window Array parseInt String JSON)
+     (extern ! ~) ; hah!
+
+     (define-macro (begin . body)
+       `((λ () ,@body)))
+
+     (define-macro (let lst . body)
+       (if (null? lst)
+           `(begin ,@body)
+           `((λ (,(caar lst)) (let ,(cdr lst) ,@body)) ,(cadar lst))))
+
+     (define-macro (new type . args)
+       `((_raw "new " ,type) ,@args))
+
+     ;; (object (a => "b") (c => "d")) -> {a: "b", c: "d"}
+     (define-macro (object . args)
+       `(_raw "{" ,@(map
+                     (λ (e)
+                       `(_raw "\"" ,(car e) "\"" ": " ,(caddr e) ","))
+                     args)
+              "}"))
+
+     ;; TODO: letrec
+     (define-macro (while test . body)
+       `(begin
+          (define (__f)
+            (if ,test (begin ,@body (__f)) #t))
+          (__f)))
+
+     (define-macro (spread thing)
+       `(_raw "[..." ,thing "]"))
+
+     (define-macro (spreading thing)
+       `(_raw "..." ,thing))
+
+     (define-macro (if test then else)
+       `(_raw "(" (begin ,test) "?" (begin ,then) ":" (begin ,else) ")"))
+
+     (define-macro (when test then)
+       `(if ,test ,then 'undefined))
+
+     (define-macro (list-ref l n)
+       `(_raw ,l "[" ,n "]"))
+
+     (define-macro (ref ob key)
+       `(_raw ,ob "." ,key))
+
+     (define-macro (car lst)
+       `(list-ref ,lst 0))
+
+     (define-macro (cdr lst)
+       `((ref ,lst 'slice) 1))
+
+     (define-macro (length ob)
+       `(ref ,ob 'length))
+
+     (define-macro (len ob)
+       `(length ,ob))
+
+     (define-macro (null? ob)
+       `(eq? (length ,ob) 0))
+
+     (define-macro (map f lst)
+       `((ref ,lst 'map) ,f))
+
+     (define-macro (take l n)
+       `((ref ,l 'slice) 0 ,n))
+
+     (define-macro (drop l n)
+       `((ref ,l 'slice) ,n))
+
+     (define-macro (list . args)
+       `(Array ,@args))
+
+     (define-macro (element! type)
+       `(document.createElement ,type))
+
+     (define-macro (print l)
+       `(console.log ,l))
+
+     )))
+
+(define (compile filename)
+  (if-lets ((lst (if (string? filename) (file->list filename) (force-ll (port->byte-stream filename))))
+            (sexps (list->sexps lst (λ _ _) "syntax error:")))
+    (lets ((code _ (get-code
+                    (append
+                     *core*
+                     sexps)
+                    (pipe empty
+                      (put 'get-exp get-exp)
+                      (put 'macros empty)
+                      (put 'names '())
+                      ))))
+      code)))
 
 (define (commize vs)
   (cond
@@ -59,258 +306,69 @@
      (car vs)
      (cdr vs)))))
 
-(define (maybe-rewrite-fn v)
-  (if (has? infix v)
-      v
-      (if-lets ((newsym (assoc v fn-rewrite-alist)))
-        (cdr newsym)
-        (jsize-symbol (str v)))))
+(define (codegen v opt*)
+  (let ((opt (put opt* 'rawstring #f))) ; use rawstring on depth 1 from _raw only
+    ;; (print "raw: " (get opt* 'rawstring #f) " for " v)
+    (if (list? v)
+        (cond
+         ((= (len v) 0) "") ; umm
+         ((= (len v) 1) (str "return " (codegen (car v) opt) ";"))
+         (else
+          (str (codegen (car v) opt) "; " (codegen (cdr v) opt))))
+        (tuple-case v
+          ((define name code)
+           (if (not (= (len code) 1))
+               (error "invalid code for define: " code)
+               (str "const " (jsize-symbol name) " = " (codegen (car code) opt))))
+          ((λ args code)
+           (str "((" (commize (map jsize-symbol args)) ") => {" (codegen code opt) "})"))
+          ((funcall function args)
+           (str "(" (codegen function opt) "(" (commize (map (C codegen opt) args)) "))"))
+          ((value v)
+           (cond
+            ((eq? #t v) "true")
+            ((eq? #f v) "false")
+            ((string? v) (if (get opt* 'rawstring #f)
+                             (str v)
+                             (str* v)))
+            ((symbol? v) (jsize-symbol v))
+            (else
+             (str v))))
+          ((noop _)
+           "")
+          ((infix! f a b)
+           (str "(" (codegen a opt) f (codegen b opt) ")"))
+          ((_raw vs)
+           (fold str "" (map (C codegen (put opt 'rawstring #t)) vs)))
+          ((set! a b)
+           (str "(" (codegen a opt) "=" (codegen b opt) ")"))
+          (else
+           (error "not implemented " v)
+           )))))
 
-(define (infix? v)
-  (or (has? infix v) (has? infix (maybe-rewrite-fn v))))
-
-(define (jsize-thing v)
-  (cond
-   ((number? v) v)
-   ((string? v) (str* v))
-   ((symbol? v) (maybe-rewrite-fn v))
-   ((list? v) (str "[" (commize (map jsize-thing v)) "]"))
-
-   (else
-    (error "unknown thing " v))))
-
-;; macro = ff of
-;;  name
-;;  args
-;;  body
-(define (defmacro? e)
-  (and (list? e)
-       (or
-        (eqv? (car e) 'defmacro)
-        (eqv? (car e) 'define-macro))))
-
-(define (macro-letize exp args body)
-  (cond
-   ((null? args) body)
-   ((pair? args)
-    `(let ((,(car args) ',(car exp)))
-       ,(macro-letize (cdr exp) (cdr args) body)))
-   (else
-    `(let ((,args ',exp))
-       ,(macro-letize #n #n body)))))
-
-(define (apply-macro macro exp walk)
-  (let* ((name (get macro 'name #f))
-         (args (get macro 'args #f))
-         (body (get macro 'body #f))
-         (code (macro-letize (cdr exp) args body)))
-    (walk (eval code *toplevel*))))
-
-(define (walk-apply-macros macros exp)
-  (let* ((names (map (λ (m) (get m 'name #f)) macros))
-         (ms (zip cons names macros)))
-    (let walk ((exp exp))
-      (cond
-       ((null? exp)
-        #n)
-       ((not (list? exp))
-        exp)
-       ((has? names (car exp))
-        (apply-macro (cdr (assoc (car exp) ms)) exp walk))
-       (else
-        (map walk exp))))))
-
-(define (macro-of exp)
-  (let* ((exps (cadr exp))
-         (name (car exps))
-         (args (cdr exps))
-         (body (caddr exp)))
-    (pipe empty
-      (put 'name name)
-      (put 'args args)
-      (put 'body body))))
-
-;; forms -> forms'
-(define (apply-macros forms)
-  (let* ((defmacros     (filter defmacro? forms))
-         (not-defmacros (filter (B not defmacro?) forms))
-         (macros (map macro-of defmacros)))
-    (map (H walk-apply-macros macros) not-defmacros)))
-
-(define core
-  '((define-macro (let lst . body)
-      (if (null? lst)
-          `(begin
-             ,@body)
-          `((λ (,(caar lst)) (let ,(cdr lst) ,@body)) ,(cadar lst))))
-    ))
-
-(define-syntax js_
-  (syntax-rules (λ begin define quote if when list-ref ref _raw set! spread spreading return new while object =>)
-    ((_ (object (key => value) ...) . rest)
-     (str
-      "({" (str (_ key) ":" (_ value) ",") ... "})"
-      (_ . rest)))
-    ((_ (while test . do) . rest)
-     (str
-      "while (" (_ test) ")" (_ (begin . do))
-      (_ . rest)))
-    ((_ (new T arg ...) . rest)
-     (str
-      "(new " (_ T) "(" (commize (list (_ arg) ...)) "))"
-      (_ . rest)))
-    ((_ (return it) . rest)
-     (str
-      "return " (_ it)
-      (_ . rest)))
-    ((_ (spread lst) . rest)
-     (str
-      "[..." (_ lst) "]"
-      (_ . rest)))
-    ((_ (spreading lst) . rest)
-     (str
-      "..." (_ lst) ""
-      (_ . rest)))
-    ((_ (set! place val) . rest)
-     (str
-      (_ place) " = " (_ val) ";"
-      (_ . rest)))
-    ((_ (_raw string) . rest)
-     (str string (_ . rest)))
-    ((_ (ref obj key) . rest)
-     (str
-      (_ obj) "." (_ key)
-      (_ . rest)))
-    ((_ (list-ref lst n) . rest)
-     (str
-      (_ lst) "[" (_ n) "]"
-      (_ . rest)))
-    ((_ (begin) . rest)
-     (_ . rest))
-    ((_ (begin exp1) . rest)
-     (str
-      "(() => { return " (_ exp1) "})();"
-      (_ . rest)))
-    ((_ (begin exp1 . exp) . rest)
-     (str
-      "(() => {" (_ exp1) "; return " (_ (begin . exp)) "})();"
-      (_ . rest)))
-    ((_ (when test . then) . rest)
-     (_ (if test (begin . then)) . rest))
-    ((_ (if test then else) . rest)
-     (str
-      "(() => { if (" (_ test) ") { return " (_ then) " } else { return " (_ else) " } })()"
-      (_ . rest)))
-    ((_ (if test then) . rest)
-     (str
-      "(() => { if (" (_ test) ") { return " (_ then) " } })()"
-      (_ . rest)))
-    ((_ (define (name . args) . code) . rest)
-     (_ (define name (λ args . code)) . rest))
-    ((_ (define name . code) . rest)
-     (str
-      "\nconst " (_ name) " = " (_ . code) ";"
-      (_ . rest)))
-    ((_ (λ (arg ...) . code) . rest)
-     (str
-      "((" (commize (list (_ arg) ...)) ") => { " (_ (return (begin . code))) " })"
-      (_ . rest)))
-    ((_ (quote thing) . rest)
-     (str (jsize-thing 'thing)
-          (_ . rest)))
-    ((_ (f arg1 arg2) . rest)  ; only check for infix operators in funcalls with 2 args, sorry in advance :/
-     (str
-      (if (infix? 'f)
-          (str "((" (_ arg1) ")" (_ 'f) "(" (_ arg2) "))")
-          (str (_ f) "(" (commize (list (_ arg1) (_ arg2))) ")")) ; this repeats >---+
-      (_ . rest)))                                                ;                  |
-    ((_ (f arg ...) . rest)                                       ;                  |
-     (str (_ f) "(" (commize (list (_ arg) ...)) ")"              ; this <-----------+
-          (_ . rest)))
-    ((_ atom . rest)
-     (str (jsize-thing 'atom)
-          (_ . rest)))
-    ((_) "")
-    ))
-
-(define-syntax js
-  (syntax-rules (*toplevel*)
-    ((_ exp ...)
-     (eval (append '(js_) (apply-macros (append core '(exp ...)))) *toplevel*))))
-
-(define lib
-  (string->list
-   (js
-    (define jsane--lib--loaded "indeed")
-
-    (define print console.log)
-    (define (car lst)   (list-ref lst 0))
-    (define (cdr lst)   ((ref lst slice) 1))
-    (define (length ob) (ref ob 'length))
-    (define len length)
-    (define (null? ob)  (eq? (length ob) 0))
-    (define (map f lst) ((ref lst map) f))
-    (define (take l n)  ((ref l 'slice) 0 n))
-    (define (drop l n)  ((ref l 'slice) n))
-
-    (define list Array)
-    (define (element! type) (document.createElement type))
-
-    (define fold (λ (f a b)
-                   (if (null? b)
-                       a
-                       (fold f (f a (car b)) (cdr b))))))))
-
-;; TODO: this assumes lib.js in the same dir and also named lib.js
-(define maybe-load-lib
-  (string->list
-   (str
-    "let when_ready; let when_jsane_ready;"
-    (js
-     (begin
-       (_raw "let jsane__ready_p = false;\n")
-
-       (define (jsane--load--lib!)
-         (let ((script (document.createElement "script"))
-               (cb (λ ()
-                     (set! jsane__ready_p true))))
-           (set! script.type "text/javascript")
-           (set! script.src "lib.js")
-           (document.head.appendChild script)
-
-           (set! script.onreadystatechange cb)
-           (set! script.onload cb)))
-
-       (define (_when-jsane-ready f)
-         (if jsane__ready_p
-             (f)
-             (setTimeout (λ () (when-jsane-ready f)) 100)))
-
-       (set! when_ready _when-jsane-ready)
-       (set! when_jsane_ready _when-jsane-ready)
-
-       (when (eqv? (typeof jsane--lib--loaded) "undefined")
-         (jsane--load--lib!))
-       )))))
+(define (fully-codegen code)
+  (fold (λ (a b)
+          (let ((v (codegen b empty)))
+            (if (string=? v "")
+                a
+                (string-append a ";\n" (codegen b empty)))))
+        "" code))
 
 (define scheme? (string->regex "m/\\.scm$/"))
 (define scheme-ext->js-ext (string->regex "s/\\.scm$/.js/"))
 
 (define command-line-rules
   (cl-rules
-   `((help     "-h" "--help")
-     (no-lib   "-n" "--no-library" comment "don't load the builtin library")
-     (input    "-i" "--input"  has-arg comment "input file directory (not recursive)")
-     (output   "-o" "--output" has-arg comment "target directory for js files" default "public"))))
+   `((help   "-h" "--help")
+     (input  "-i" "--input"  has-arg comment "input file directory (not recursive)")
+     (output "-o" "--output" has-arg comment "target directory for js files" default "public")
+     ;; (ast    "-p" "--print-ast" comment "print the AST")
+     )))
 
 (define (full-path d s)
   (format #f "~a/~a" d s))
 
-(define (eval-file path)
-  (let* ((lst (if (port? path) (force-ll (port->byte-stream path)) (file->list path)))
-         (code `(let ((*toplevel* ,*toplevel*)) ,(append '(js) (list->sexps lst print "syntax-error"))))
-         (res (eval code *toplevel*)))
-    (string->list res)))
+(define eval-file (B string->bytes (B fully-codegen compile)))
 
 (λ (args)
   (process-arguments
@@ -322,7 +380,7 @@
 
      (let ((in (get opt 'input #f))
            (out (get opt 'output #f))
-           (no-lib (get opt 'no-lib #f)))
+           (ast (get opt 'ast #f)))
        (cond
         ((= (length extra) 1)         (write-bytes stdout (eval-file (car extra))) 0)
         ((and (null? extra) (not in)) (write-bytes stdout (eval-file stdin)) 0)
@@ -333,9 +391,6 @@
          (when (not (sys/directory? out))
            (sys/mkdir out #o755))
 
-         (unless no-lib
-           (list->file lib (str out "/lib.js")))
-
          (let walk ((files
                      (filter
                       (λ (f) (let ((p (full-path in f)))
@@ -345,6 +400,6 @@
                0
                (let* ((inp (full-path in (car files)))
                       (outp (full-path out (scheme-ext->js-ext (car files)))))
-                 (list->file (append (if no-lib #n maybe-load-lib) (eval-file inp)) outp)
+                 (list->file (eval-file inp) outp)
                  (format stdout "~a -> ~a~%" inp outp)
                  (walk (cdr files)))))))))))
